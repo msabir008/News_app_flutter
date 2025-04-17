@@ -1,188 +1,367 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
 
 class ArticleCommentsSection extends StatelessWidget {
   final int commentCount;
   final List<dynamic> comments;
   final bool isLoadingComments;
   final TextEditingController commentController;
-  final VoidCallback onPostComment;
-  final VoidCallback onFetchComments;
+  final Function onPostComment;
+  final Function onFetchComments;
+  final Function(String, String)? onEditComment;
+  final Function(String)? onDeleteComment;
 
   const ArticleCommentsSection({
+    Key? key,
     required this.commentCount,
     required this.comments,
     required this.isLoadingComments,
     required this.commentController,
     required this.onPostComment,
     required this.onFetchComments,
-  });
+    this.onEditComment,
+    this.onDeleteComment,
+  }) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        SizedBox(height: 24.0),
+        SizedBox(height: 24),
         Text(
-          "Comments ($commentCount)",
+          'Comments ($commentCount)',
           style: TextStyle(
-            fontSize: 18.0,
+            fontSize: 18,
             fontWeight: FontWeight.bold,
           ),
         ),
-        SizedBox(height: 16.0),
-        Container(
-          height: 50.0,
-          decoration: BoxDecoration(
-            color: Colors.grey.shade100,
-            borderRadius: BorderRadius.circular(25.0),
-          ),
-          child: TextField(
-            controller: commentController,
-            decoration: InputDecoration(
-              hintText: "Add a comment...",
-              prefixIcon: CircleAvatar(
-                radius: 14,
-                backgroundColor: Colors.black,
-                child: Icon(Icons.person, size: 16, color: Colors.white),
-              ),
-              suffixIcon: IconButton(
-                icon: Icon(Icons.send, color: Colors.black),
-                onPressed: onPostComment,
-              ),
-              border: InputBorder.none,
-              contentPadding: EdgeInsets.symmetric(
-                vertical: 10.0,
-                horizontal: 10.0,
+        SizedBox(height: 12),
+
+        // Comment input field
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: commentController,
+                decoration: InputDecoration(
+                  hintText: 'Add a comment...',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                ),
+                maxLines: 3,
+                minLines: 1,
               ),
             ),
-          ),
+            SizedBox(width: 8),
+            ElevatedButton(
+              onPressed: () => onPostComment(),
+              child: Text('Post'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.black,
+                foregroundColor: Colors.white,
+                padding: EdgeInsets.symmetric(vertical: 12),
+              ),
+            ),
+          ],
         ),
-        SizedBox(height: 20.0),
+
+        SizedBox(height: 16),
+
+        // Comments list
         if (isLoadingComments)
           Center(child: CircularProgressIndicator())
         else if (comments.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 20.0),
-            child: Center(
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
               child: Text(
-                "No comments yet",
-                style: TextStyle(color: Colors.grey),
+                'No comments yet. Be the first to comment!',
+                style: TextStyle(
+                  color: Colors.grey,
+                  fontStyle: FontStyle.italic,
+                ),
               ),
             ),
           )
         else
-          ...comments.map((comment) {
-            return _CommentItem(
-              username: comment['user']['name'] ?? 'Anonymous',
-              comment: comment['comment'] ?? '',
-              time: _formatTimeAgo(comment['created_at'] ?? ''),
-              likes: comment['likes_count'] ?? 0,
-            );
-          }).toList(),
-        if (comments.isNotEmpty && comments.length < commentCount)
-          Center(
-            child: TextButton(
-              onPressed: onFetchComments,
-              child: Text(
-                "View all $commentCount comments",
-                style: TextStyle(
-                  color: Colors.black,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
+          ListView.separated(
+            shrinkWrap: true,
+            physics: NeverScrollableScrollPhysics(),
+            itemCount: comments.length,
+            separatorBuilder: (context, index) => Divider(),
+            itemBuilder: (context, index) {
+              final comment = comments[index];
+              return CommentItem(
+                comment: comment,
+                onEdit: onEditComment,
+                onDelete: onDeleteComment,
+              );
+            },
           ),
-        SizedBox(height: 30.0),
+
+        if (commentCount > 0 && !isLoadingComments)
+          TextButton(
+            onPressed: () => onFetchComments(),
+            child: Text('Refresh Comments'),
+          ),
       ],
     );
   }
-
-  String _formatTimeAgo(String dateString) {
-    return dateString; // Implement actual time formatting
-  }
 }
 
-class _CommentItem extends StatelessWidget {
-  final String username;
-  final String comment;
-  final String time;
-  final int likes;
 
-  const _CommentItem({
-    required this.username,
+class CommentItem extends StatefulWidget {
+  final dynamic comment;
+  final Function(String, String)? onEdit;
+  final Function(String)? onDelete;
+
+  const CommentItem({
+    Key? key,
     required this.comment,
-    required this.time,
-    required this.likes,
-  });
+    this.onEdit,
+    this.onDelete,
+  }) : super(key: key);
+
+  @override
+  _CommentItemState createState() => _CommentItemState();
+}
+
+class _CommentItemState extends State<CommentItem> {
+  bool isEditing = false;
+  late TextEditingController editController;
+  bool isCurrentUserComment = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Handle both possible data structures (String or Map)
+    String commentText = '';
+    if (widget.comment is Map) {
+      commentText = widget.comment['comment'] ?? '';
+    } else if (widget.comment is String) {
+      commentText = widget.comment;
+    }
+    editController = TextEditingController(text: commentText);
+
+    // Check if this comment belongs to current user
+    _checkIfCurrentUserComment();
+  }
+
+  @override
+  void dispose() {
+    editController.dispose();
+    super.dispose();
+  }
+
+  // Method to parse user data with double JSON encoding
+  Map<String, dynamic> getParsedUser(String data) {
+    try {
+      // First parse to remove outer quotes
+      final firstParse = json.decode(data);
+      // Second parse to get the actual object
+      if (firstParse is String) {
+        return json.decode(firstParse);
+      } else if (firstParse is Map) {
+        return Map<String, dynamic>.from(firstParse);
+      }
+      return {};
+    } catch (e) {
+      print('Error parsing user data: $e');
+      return {};
+    }
+  }
+
+  // Check if the current user is the author of this comment
+  Future<void> _checkIfCurrentUserComment() async {
+    if (widget.comment is! Map) {
+      setState(() => isCurrentUserComment = false);
+      return;
+    }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      String? username;
+      String? email;
+
+      // Try to get username and email directly
+      username = prefs.getString('username');
+      email = prefs.getString('email');
+
+      // If not found directly, try from user object with double parsing
+      if (username == null || email == null || username.isEmpty || email.isEmpty) {
+        final userJson = prefs.getString('user');
+        if (userJson != null) {
+          try {
+            final userData = getParsedUser(userJson);
+            username = userData['username'] ?? '';
+            email = userData['email'] ?? '';
+          } catch (e) {
+            print('Error parsing user JSON: $e');
+          }
+        }
+      }
+
+      if (username == null || username.isEmpty) {
+        setState(() => isCurrentUserComment = false);
+        return;
+      }
+
+      // Check if username or email matches the comment author
+      String commentUsername = widget.comment['user_name'] ?? widget.comment['username'] ?? '';
+      String commentEmail = widget.comment['user_email'] ?? '';
+
+      setState(() {
+        isCurrentUserComment = (username == commentUsername) ||
+            (email != null && email.isNotEmpty && email == commentEmail);
+      });
+    } catch (e) {
+      print('Error checking if comment belongs to current user: $e');
+      setState(() => isCurrentUserComment = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    // Handle both possible data structures
+    String username = '';
+    String date = '';
+    String commentId = '';
+    String commentText = '';
+
+    if (widget.comment is Map) {
+      // Check for all possible keys where username might be stored
+      username = widget.comment['user_name'] ?? widget.comment['username'] ?? '';
+
+      // If still empty, try checking nested user object if it exists
+      if (username.isEmpty && widget.comment['user'] != null) {
+        final user = widget.comment['user'];
+        if (user is Map) {
+          username = user['name'] ?? user['username'] ?? '';
+        }
+      }
+
+      // Only use 'Anonymous' if we couldn't find a username anywhere
+      if (username.isEmpty) {
+        username = 'Anonymous';
+      }
+
+      date = widget.comment['date'] ?? widget.comment['created_at'] ?? '';
+      commentId = (widget.comment['id'] ?? widget.comment['comment_id'] ?? '').toString();
+      commentText = widget.comment['comment'] ?? '';
+    } else if (widget.comment is String) {
+      // When comment is just a string, we can't extract a username
+      username = 'Anonymous';
+      commentText = widget.comment;
+    }
+
     return Container(
-      margin: EdgeInsets.only(bottom: 16.0),
-      child: Row(
+      padding: EdgeInsets.symmetric(vertical: 8),
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          CircleAvatar(
-            radius: 16,
-            backgroundColor: Colors.grey.shade300,
-            child: Icon(Icons.person, size: 20, color: Colors.grey.shade700),
-          ),
-          SizedBox(width: 12.0),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          Row(
+            children: [
+              CircleAvatar(
+                backgroundColor: Colors.grey.shade300,
+                child: Text(
+                  username.isNotEmpty ? username[0].toUpperCase() : 'A',
+                  style: TextStyle(color: Colors.black),
+                ),
+              ),
+              SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       username,
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
-                        fontSize: 14.0,
                       ),
                     ),
-                    Text(
-                      time,
-                      style: TextStyle(
-                        color: Colors.grey,
-                        fontSize: 12.0,
+                    if (date.isNotEmpty)
+                      Text(
+                        date,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                        ),
                       ),
+                  ],
+                ),
+              ),
+              if (isCurrentUserComment && widget.onEdit != null && widget.onDelete != null)
+                PopupMenuButton<String>(
+                  onSelected: (value) {
+                    if (value == 'edit') {
+                      setState(() {
+                        isEditing = true;
+                      });
+                    } else if (value == 'delete') {
+                      widget.onDelete?.call(commentId);
+                    }
+                  },
+                  itemBuilder: (context) => [
+                    PopupMenuItem(
+                      value: 'edit',
+                      child: Text('Edit'),
+                    ),
+                    PopupMenuItem(
+                      value: 'delete',
+                      child: Text('Delete'),
                     ),
                   ],
                 ),
-                SizedBox(height: 4.0),
-                Text(
-                  comment,
-                  style: TextStyle(fontSize: 14.0),
+            ],
+          ),
+          SizedBox(height: 8),
+          if (isEditing)
+            Column(
+              children: [
+                TextField(
+                  controller: editController,
+                  decoration: InputDecoration(
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.all(8),
+                  ),
+                  maxLines: 3,
                 ),
-                SizedBox(height: 8.0),
                 Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
                   children: [
-                    Icon(Icons.thumb_up, size: 12, color: Colors.grey),
-                    SizedBox(width: 4.0),
-                    Text(
-                      "$likes",
-                      style: TextStyle(
-                        color: Colors.grey,
-                        fontSize: 12.0,
-                      ),
+                    TextButton(
+                      onPressed: () {
+                        setState(() {
+                          isEditing = false;
+                        });
+                      },
+                      child: Text('Cancel'),
                     ),
-                    SizedBox(width: 16.0),
-                    Text(
-                      "Reply",
-                      style: TextStyle(
-                        color: Colors.grey,
-                        fontSize: 12.0,
-                        fontWeight: FontWeight.bold,
+                    ElevatedButton(
+                      onPressed: () {
+                        if (widget.onEdit != null && commentId.isNotEmpty) {
+                          widget.onEdit!(commentId, editController.text);
+                        }
+                        setState(() {
+                          isEditing = false;
+                        });
+                      },
+                      child: Text('Save'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.black,
+                        foregroundColor: Colors.white,
                       ),
                     ),
                   ],
                 ),
               ],
-            ),
-          ),
+            )
+          else
+            Text(commentText),
         ],
       ),
     );
